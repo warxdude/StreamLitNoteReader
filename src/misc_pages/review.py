@@ -1,5 +1,7 @@
-import streamlit as st 
+import streamlit as st
+import pandas as pd 
 import re
+import io
 
 custom_css = """
 <style>
@@ -8,7 +10,7 @@ textarea {
 }
 </style>
 """
-# r"(Medications Prior to Admission)(?:[:])?$"
+
 note_headers=[  r"(Current\s?(Facility-Administered)?)?\s?Medications\s?(Prior to Admission)?:?\s+",
                 r"Objective:?\s+",
                 r"Subjective:?\s+",
@@ -30,8 +32,8 @@ note_headers=[  r"(Current\s?(Facility-Administered)?)?\s?Medications\s?(Prior t
                  ]
 
 @st.dialog("Add Your Comments")
-def add_feedback(idx):
-    orig_df_idx = st.session_state.filtered_df.loc[idx,"index"]
+def add_feedback():
+    orig_df_idx = st.session_state.filtered_df.loc[st.session_state.selected_row,"index"]
     current_comments = st.session_state.notes_dataframe.loc[orig_df_idx,"comments"]
     current_result = st.session_state.notes_dataframe.loc[orig_df_idx,"correct"]
     current_reviewer = st.session_state.notes_dataframe.loc[orig_df_idx,"reviewer"]
@@ -40,12 +42,19 @@ def add_feedback(idx):
     correct_result = st.toggle("Correct:", value=False if current_result == "" or current_result == 'No' else True)
     if st.button("Submit",type="primary"):
         if len(comment) > 1 and len(reviewer_initials) > 1:
+            st.session_state.dirty = True
             st.session_state.notes_dataframe.loc[orig_df_idx,"comments"] = comment
             st.session_state.notes_dataframe.loc[orig_df_idx,"reviewer"] = reviewer_initials
             st.session_state.notes_dataframe.loc[orig_df_idx,"correct"] = 'Yes' if correct_result else 'No'
             st.rerun()
         else:
             st.warning("Check your comment and initials before submitting.  Click the 'X' to close")
+
+def fillXlBuffer():
+    out_buffer=io.BytesIO()
+    with pd.ExcelWriter(out_buffer,engine='xlsxwriter') as writer:
+         st.session_state.notes_dataframe.to_excel(writer,sheet_name='Sheet1',index=False)
+    return out_buffer.getvalue()
 
 def split_and_create_dict(text, headers):
     patterns = "(" + "|".join(s for s in headers) + ")"
@@ -62,53 +71,48 @@ def split_and_create_dict(text, headers):
     return result_dict
 
 def refreshDf():
-    
+
     st.session_state.filtered_df = st.session_state.notes_dataframe.copy()
     for key in st.session_state.filter_tracker:
         if len(st.session_state.filter_tracker[key]['selections']) > 0: 
             st.session_state.filtered_df = st.session_state.filtered_df[st.session_state.filtered_df[key].isin(st.session_state.filter_tracker[key]['selections'])]
     st.session_state.filtered_df=st.session_state.filtered_df.reset_index()
 
-def resetFilters():
-   
-   temp_df = st.session_state.notes_dataframe.copy()
-   for col in temp_df.columns:
-       st.session_state['filter_tracker'][col] = { 'selected':False, 'selections':  temp_df[col].unique().tolist()  }
-   st.session_state.col_select_key = []
+def resetFilters(**kwargs):
+   if kwargs['action'] == 'reset':
+      temp_df = st.session_state.notes_dataframe.copy()
+      for col in temp_df.columns:
+          st.session_state['filter_tracker'][col] = { 'selected':False, 'selections':  temp_df[col].unique().tolist()  }
+      st.session_state.col_select_key = []
+      st.session_state.selected_row = -1
    refreshDf()
 
+def format_note(idx):
+    textDict = split_and_create_dict(st.session_state.filtered_df.loc[idx,"note_text"], note_headers)
+    noteSections = [f"{re.sub(r":$","",k.strip())}{"" if k == "" else ":"}\n{re.sub(r"^\s+","",v)}" for k, v in textDict.items()]
+    formattedNote = "\n\n".join(noteSections) 
+    st.session_state.note_text = formattedNote
+
+def format_change():
+    if st.session_state.selected_row >= 0:
+       if st.session_state.fmt_note:
+          format_note(st.session_state.selected_row)
+       else:
+          st.session_state.note_text = st.session_state.filtered_df.loc[st.session_state.selected_row,"note_text"] 
    
 def row_selected():
-
     if len(st.session_state.dataframe.selection.rows) > 0:
-       for idx in st.session_state.dataframe.selection.rows:
-          
-           with mainContainer:
-               st.markdown(custom_css, unsafe_allow_html=True)
-               with st.expander("See Note",expanded=True):
-                      col1, col2 = st.columns([0.12,0.88])
-                      with col1:
-                        show_fmt = st.toggle("Format Note",value=True, key=f"note_fmt_{idx}")
-                      with col2:
-                        if st.button("Comments", icon=":material/comment:",type="primary"):
-                            add_feedback(idx)
-                      if show_fmt:
-                          textDict = split_and_create_dict(st.session_state.filtered_df.loc[idx,"note_text"], note_headers)
-                          noteSections = [f"{re.sub(r":$","",k.strip())}{"" if k == "" else ":"}\n{re.sub(r"^\s+","",v)}" for k, v in textDict.items()]
-                          formattedNote = "\n\n".join(noteSections) 
-                          st.text_area("Note", formattedNote,height=800,key=f"sel_{idx}")
-                      else:
-                          st.text_area("Note", st.session_state.filtered_df.loc[idx,"note_text"],height=800,key=f"sel_{idx}")
-                     
-                         
+        st.session_state.selected_row=st.session_state.dataframe.selection.rows[0]
+        format_note(st.session_state.selected_row)    
     else:
-       with mainContainer:
-         st.info("Select row to display note text")       
+        st.session_state.selected_row = -1  
+            
 
 
 def applyFilters(**kwargs):
     session_key = kwargs['key']
     selected_options = st.session_state[session_key]
+    st.session_state.selected_row = -1  
     if len(selected_options) > 0:
         for opt in selected_options:
             last = set(st.session_state.filter_tracker[session_key]['selections'])
@@ -119,6 +123,7 @@ def applyFilters(**kwargs):
                     st.session_state.filter_tracker[session_key]['selections'].append(opt)
             
     else:
+        
         st.session_state.filter_tracker[session_key]['selected'] = False
         st.session_state.filter_tracker[session_key]['selections'] = st.session_state.notes_dataframe[session_key].unique().tolist()
     enableFilters()
@@ -154,17 +159,43 @@ try:
                             st.session_state.filter_tracker.keys(), 
                             key='col_select_key', 
                             on_change=enableFilters)
-             st.button("Clear",on_click=resetFilters,type="primary")
+             st.button("Clear",on_click=resetFilters,type="primary",kwargs={'action':'reset'})
              for key in st.session_state.filter_tracker:
                  if st.session_state.filter_tracker[key]['selected']:
-                    st.multiselect(key,st.session_state.notes_dataframe[key].unique().tolist(),key=key,kwargs={"key":key},on_change=applyFilters, default=st.session_state.filter_tracker[key]['selections'])
-        with mainContainer:            
+                    st.multiselect(key,
+                                   st.session_state.notes_dataframe[key].unique().tolist(),
+                                   key=key,kwargs={"key":key},
+                                   on_change=applyFilters, 
+                                   default=st.session_state.filter_tracker[key]['selections']
+                                   )
+        with mainContainer: 
+            if st.button("Save to Excel"):
+               st.download_button(label='Download',
+                                  data=fillXlBuffer(),
+                                  file_name=st.session_state.filename,
+                                  mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                  icon=":material/download:")   
             with st.expander("View Data", expanded=True):
+                    if st.session_state.dirty:
+                       refreshDf()
                     dfWidget=st.dataframe(st.session_state.filtered_df,
                                     selection_mode=['single-row'],
                                     key="dataframe",
-                                    on_select="rerun")
-                    row_selected()
+                                    on_select=row_selected)
+                    st.session_state.dirty = False
+            if st.session_state.selected_row != -1: 
+                st.markdown(custom_css, unsafe_allow_html=True)
+                with st.expander("See Note",expanded=True):
+                     col1, col2 = st.columns([0.12,0.88])
+                     with col1:
+                        st.toggle("Format Note",value=True, key="fmt_note", on_change=format_change)
+                     with col2:
+                        if st.button("Comments", icon=":material/comment:",type="primary"):
+                           add_feedback()
+                     st.text_area("Note",st.session_state.note_text,height=800)
+            else:
+                st.info("Select row to display note text")     
+
 
     else:
        st.info('Select file to load into dataframe.')
